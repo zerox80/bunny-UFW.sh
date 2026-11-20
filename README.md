@@ -33,7 +33,9 @@ deshalb sauber ab.
 4. Ports wählen (Standard: 443). SSH-Ports werden abgelehnt, damit du dich nicht aussperrst
 5. Domains aus nginx, Apache, Caddy und Let's-Encrypt-Zertifikaten auflisten, mit DNS-Einschätzung
    (*über Bunny*, *direkt auf diesen Server*, *anderer Server*). Hier wählst du die Domains,
-   die ohne Bunny erreichbar sein sollen
+   die ohne Bunny erreichbar sein sollen. Mehrere gehen mit Leerzeichen oder Komma
+   (`2 3`, `2,3`), Bereiche mit `2-4`, alle mit `alle`. Nicht gelistete Domains tippst du
+   einfach ein
 6. Weitere Ausnahmen: private Netze (Docker, VPN, LAN), eigene IPs
 7. Abgleich mit UFW/firewalld und Zusammenfassung
 8. Aktivieren, testen, bestätigen

@@ -141,14 +141,31 @@ ask() {
   local __v=$1 __p=$2 __d=${3-} __a=""
   if [[ -n $__d ]]; then __p+=" [$__d]"; fi
   tty_ok || die "Keine Eingabe möglich (läuft das Skript in einem Terminal?)"
-  if [[ -t $TTY_FD ]]; then
-    IFS= read -r -e -p "  $__p: " __a <&"$TTY_FD" || die "Keine Eingabe mehr (Terminal geschlossen?)"
-  else
-    printf '  %s: ' "$__p"
-    IFS= read -r __a <&"$TTY_FD" || die "Keine Eingabe mehr."
-    printf '%s\n' "$__a"
-  fi
-  printf -v "$__v" '%s' "${__a:-$__d}"
+  printf '  %s: ' "$__p"
+  IFS= read -r __a <&"$TTY_FD" || die "Keine Eingabe mehr (Terminal geschlossen?)"
+  if [[ ! -t $TTY_FD ]]; then printf '%s\n' "$__a"; fi
+  printf -v "$__v" '%s' "$(trim "${__a:-$__d}")"
+}
+
+# Auswahl zerlegen: Leerzeichen oder Komma, Bereiche "2-4", "alle"  -> Array SEL
+SEL=()
+split_selection() { # EINGABE MAX
+  local input=${1//,/ } max=${2:-0} t a b i
+  local -a raw=()
+  SEL=()
+  read -r -a raw <<<"$input" || true
+  for t in "${raw[@]}"; do
+    t=${t,,}
+    if [[ $t =~ ^([0-9]{1,4})-([0-9]{1,4})$ ]]; then
+      a=$((10#${BASH_REMATCH[1]})); b=$((10#${BASH_REMATCH[2]}))
+      if (( a > b )); then i=$a; a=$b; b=$i; fi
+      for (( i = a; i <= b; i++ )); do SEL+=("$i"); done
+    elif [[ $t == alle || $t == all || $t == '*' ]] && (( max > 0 )); then
+      for (( i = 1; i <= max; i++ )); do SEL+=("$i"); done
+    else
+      SEL+=("$t")
+    fi
+  done
 }
 
 # ask_yn "Frage" j|n   -> 0 = ja
@@ -157,14 +174,10 @@ ask_yn() {
   if [[ $d == j ]]; then hint="J/n"; fi
   tty_ok || die "Keine Eingabe möglich (läuft das Skript in einem Terminal?)"
   while true; do
-    if [[ -t $TTY_FD ]]; then
-      IFS= read -r -p "  $p [$hint]: " a <&"$TTY_FD" || die "Keine Eingabe mehr (Terminal geschlossen?)"
-    else
-      printf '  %s [%s]: ' "$p" "$hint"
-      IFS= read -r a <&"$TTY_FD" || die "Keine Eingabe mehr."
-      printf '%s\n' "$a"
-    fi
-    a=${a,,}; a=${a:-$d}
+    printf '  %s [%s]: ' "$p" "$hint"
+    IFS= read -r a <&"$TTY_FD" || die "Keine Eingabe mehr (Terminal geschlossen?)"
+    if [[ ! -t $TTY_FD ]]; then printf '%s\n' "$a"; fi
+    a=$(trim "${a,,}"); a=${a:-$d}
     case $a in
       j|ja|y|yes) return 0 ;;
       n|nein|no)  return 1 ;;
@@ -243,7 +256,9 @@ only_v6() { local w; for w in "$@"; do if is_ipv6 "$w"; then printf '%s\n' "$w";
 
 # --- Sperre --------------------------------------------------------------------
 lock() { exec 9>"$LOCK_FILE"; flock -w 90 9 || die "Eine andere bunny-guard-Instanz läuft gerade."; }
-unlock() { flock -u 9 2>/dev/null || true; exec 9>&- 2>/dev/null || true; }
+# Achtung: "exec 9>&- 2>/dev/null" würde stderr dauerhaft umleiten (exec ohne
+# Befehl macht alle Umleitungen permanent) – dann wären Fragen und Eingaben unsichtbar.
+unlock() { flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 # --- Konfiguration -------------------------------------------------------------
 sanitize_config() {
@@ -1756,8 +1771,8 @@ wizard_ports() {
   srvport=""
   if [[ -n ${SSH_CONNECTION:-} ]]; then srvport=${SSH_CONNECTION##* }; fi
   while true; do
-    ask input "Welche Ports sollen nur für Bunny offen sein? (Leerzeichen-getrennt)" "$PORTS"
-    read -r -a list <<<"$input" || true
+    ask input "Welche Ports sollen nur für Bunny offen sein? (mehrere mit Leerzeichen oder Komma, z.B. 443,8443)" "$PORTS"
+    read -r -a list <<<"${input//,/ }" || true
     ok_ports=1
     for p in "${list[@]}"; do
       if ! is_port "$p"; then warn "Ungültiger Port: $p"; ok_ports=0; continue; fi
@@ -1809,17 +1824,19 @@ wizard_domains() {
   fi
   say ""
   say "  ${CB}Welche Domains sollen OHNE Bunny direkt erreichbar sein?${C0}"
-  note "Nummern oder Domains, mit Leerzeichen getrennt. '-' = keine (alles nur über Bunny)."
+  note "Mehrere möglich: Nummern oder Domains mit Leerzeichen oder Komma (z.B. 2 3 oder 2,3),"
+  note "Bereiche (2-4) oder 'alle'. Nicht gelistete Domains einfach eintippen. '-' = keine."
   while true; do
     ask input "Domains ohne Bunny" "${DIRECT_DOMAINS:--}"
     if [[ $input == - ]]; then input=""; fi
-    read -r -a toks <<<"$input" || true
+    split_selection "$input" "${#DOM_NAME[@]}"
+    toks=("${SEL[@]}")
     sel=(); okflag=1
     for tok in "${toks[@]}"; do
-      tok=${tok,,}; tok=${tok%,}
       if [[ $tok =~ ^[0-9]+$ ]]; then
         n=$((10#$tok))
-        if (( n >= 1 && n <= ${#DOM_NAME[@]} )); then sel+=("${DOM_NAME[n - 1]}")
+        if (( n >= 1 && n <= ${#DOM_NAME[@]} )); then
+          if ! in_list "${DOM_NAME[n - 1]}" "${sel[@]}"; then sel+=("${DOM_NAME[n - 1]}"); fi
         else warn "Nummer $tok gibt es nicht."; okflag=0; fi
       elif is_domain "$tok"; then
         if ! dom_index "$tok" >/dev/null; then
@@ -1827,7 +1844,7 @@ wizard_domains() {
           i=$(dom_index "$tok")
           note "$tok → ${DOM_TGT[i]} ($(stat_label "${DOM_STAT[i]}"))"
         fi
-        sel+=("$tok")
+        if ! in_list "$tok" "${sel[@]}"; then sel+=("$tok"); fi
       else
         warn "Ungültige Eingabe: $tok"; okflag=0
       fi
@@ -1848,7 +1865,7 @@ wizard_domains() {
 }
 
 wizard_exemptions() {
-  local d i ip input n rc choice reach
+  local d i ip input n rc choice reach tok
   local -a cand=() bunny_doms=() locs=() reach_list=()
   local -A ip_doms=()
   EXEMPT_DST="" DIRECT_DOMAINS="" NGINX_MODE=0
@@ -1868,12 +1885,17 @@ wizard_exemptions() {
         warn "$d zeigt auf keine IP dieses Servers (DNS: ${DOM_TGT[i]})."
       fi
       print_local_ips
-      ask input "Auf welcher Server-IP soll $d direkt laufen? (Nummer, Enter = überspringen)" ""
-      if [[ $input =~ ^[0-9]+$ ]] && (( 10#$input >= 1 && 10#$input <= ${#LOCAL_IPS[@]} )); then
-        locs=("${LOCAL_IPS[10#$input - 1]}")
-      else
-        note "$d übersprungen."; continue
-      fi
+      ask input "Auf welcher Server-IP soll $d direkt laufen? (Nummer, mehrere z.B. '1 2' für IPv4+IPv6; Enter = überspringen)" ""
+      split_selection "$input" "${#LOCAL_IPS[@]}"
+      locs=()
+      for tok in "${SEL[@]}"; do
+        if [[ $tok =~ ^[0-9]+$ ]] && (( 10#$tok >= 1 && 10#$tok <= ${#LOCAL_IPS[@]} )); then
+          if ! in_list "${LOCAL_IPS[10#$tok - 1]}" "${locs[@]}"; then locs+=("${LOCAL_IPS[10#$tok - 1]}"); fi
+        else
+          warn "Nummer $tok gibt es nicht – ignoriert."
+        fi
+      done
+      if (( ${#locs[@]} == 0 )); then note "$d übersprungen."; continue; fi
     fi
     for ip in "${locs[@]}"; do
       if [[ -z ${ip_doms[$ip]-} ]]; then cand+=("$ip"); fi
@@ -1888,7 +1910,8 @@ wizard_exemptions() {
     for d in "${bunny_doms[@]}"; do
       n=$((n + 1)); if (( n > 15 )); then break; fi
       rc=0; site_served "$d" "$ip" || rc=$?
-      if (( rc == 0 )); then reach_list+=("$d"); fi
+      # 2 = von der nginx-Sperre blockiert: die Seite liegt trotzdem auf dieser IP
+      if (( rc == 0 || rc == 2 )); then reach_list+=("$d"); fi
     done
     if (( ${#bunny_doms[@]} == 0 )); then
       note "Keine Bunny-Domain zum Gegentesten bekannt."
@@ -1959,8 +1982,9 @@ wizard_sources() {
   local w good
   local -a words=()
   while true; do
-    ask input "Weitere Quell-IPs/Netze, die immer direkt dürfen ('-' = keine)" "${ALLOW_SRC:--}"
+    ask input "Weitere Quell-IPs/Netze, die immer direkt dürfen (mehrere mit Leerzeichen oder Komma; '-' = keine)" "${ALLOW_SRC:--}"
     if [[ $input == - ]]; then input=""; fi
+    input=${input//,/ }
     read -r -a words <<<"$input" || true
     good=1
     for w in "${words[@]}"; do if ! is_ip_net "${w,,}"; then warn "Ungültig: $w"; good=0; fi; done
